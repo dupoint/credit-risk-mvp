@@ -1,126 +1,119 @@
 #!/bin/bash
+set -e  # Exit immediately if a command exits with a non-zero status
 
 # ==================================================================================
-# SETUP SCRIPT FOR CREDIT RISK AI PLATFORM
-# Usage: ./setup.sh [PROJECT_ID] [REGION]
-# Example: ./setup.sh my-new-project-123 us-central1
+#  🏦 CREDIT RISK MVP - INFRASTRUCTURE SETUP
+#  "One-Click" Deployment Script (Idempotent & Path-Agnostic)
 # ==================================================================================
 
-# 1. CONFIGURATION
-# ----------------------------------------------------------------------------------
-if [ -z "$1" ]; then
-    echo "❌ Error: No Project ID provided."
-    echo "Usage: ./setup.sh [PROJECT_ID] [REGION]"
-    exit 1
+# 1. DYNAMIC PATH RESOLUTION
+# This ensures the script works regardless of where you call it from (root or infra/)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# 2. ARGUMENT PARSING
+PROJECT_ID=$1
+REGION=$2
+
+if [ -z "$PROJECT_ID" ] || [ -z "$REGION" ]; then
+  echo "❌ Usage: ./setup.sh [PROJECT_ID] [REGION]"
+  echo "   Example: ./setup.sh my-project-id us-central1"
+  exit 1
 fi
 
-PROJECT_ID=$1
-REGION=${2:-us-central1} # Default to us-central1 if not provided
+echo "🚀 Starting Deployment for Project: $PROJECT_ID ($REGION)"
+echo "📂 Project Root detected at: $ROOT_DIR"
+
+# ==================================================================================
+#  PHASE 1: ENABLE APIs & IAM
+# ==================================================================================
+echo "🔌 Enabling Google Cloud APIs (This may take 30s)..."
+gcloud services enable \
+  artifactregistry.googleapis.com \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  bigquery.googleapis.com \
+  storage.googleapis.com \
+  --project=$PROJECT_ID --quiet
+
+# PAUSE: Give Google's backend time to propagate the API changes
+echo "⏳ Waiting 15s for APIs to warm up..."
+sleep 15
+
+# ==================================================================================
+#  PHASE 2: STORAGE & DATA
+# ==================================================================================
 BUCKET_NAME="${PROJECT_ID}-data"
 
-echo "🚧 STARTING SETUP..."
-echo "   Project: $PROJECT_ID"
-echo "   Region:  $REGION"
-echo "   Bucket:  $BUCKET_NAME"
-echo "------------------------------------------------------------------"
-
-# Switch to the target project
-gcloud config set project $PROJECT_ID
-
-# 2. ENABLE GOOGLE CLOUD APIS
-# ----------------------------------------------------------------------------------
-echo "🔌 Enabling required APIs (this may take a minute)..."
-gcloud services enable \
-  bigquery.googleapis.com \
-  run.googleapis.com \
-  storage.googleapis.com \
-  documentai.googleapis.com \
-  artifactregistry.googleapis.com \
-  cloudbuild.googleapis.com \
-  --project $PROJECT_ID
-
-# 3. CREATE INFRASTRUCTURE (Storage & BigQuery)
-# ----------------------------------------------------------------------------------
-echo "📦 Creating Storage Bucket..."
-# Check if bucket exists, if not create it
+echo "📦 Setting up Cloud Storage: gs://$BUCKET_NAME"
 if ! gsutil ls -b gs://$BUCKET_NAME > /dev/null 2>&1; then
-  gsutil mb -p $PROJECT_ID -l $REGION gs://$BUCKET_NAME/
-  echo "   ✅ Bucket created: gs://$BUCKET_NAME"
+  gsutil mb -l $REGION gs://$BUCKET_NAME
+  echo "   ✅ Bucket created."
 else
   echo "   ⚠️ Bucket already exists. Skipping."
 fi
 
-echo "🗄️  Creating BigQuery Dataset..."
-# Check if dataset exists, if not create it
-if ! bq ls --project_id=$PROJECT_ID credit_risk_mvp > /dev/null 2>&1; then
-  bq --location=$REGION mk -d --project_id=$PROJECT_ID credit_risk_mvp
-  echo "   ✅ Dataset created."
-else
-  echo "   ⚠️ Dataset 'credit_risk_mvp' already exists. Skipping."
-fi
+# ==================================================================================
+#  PHASE 3: BIGQUERY (Robust Creation)
+# ==================================================================================
+DATASET_NAME="credit_risk_mvp"
+echo "🗄️  Setting up BigQuery Dataset: $DATASET_NAME"
 
-# 4. DATA GENERATION (Synthetic Data)
-# ----------------------------------------------------------------------------------
-echo "------------------------------------------------------------------"
-read -p "🎲 Do you want to generate 5,000 synthetic training records? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]
-then
-    echo "⚡ Installing dependencies for data generator..."
-    pip install google-cloud-storage --quiet
+# We use 'bq mk' with '|| true' to suppress errors if it exists. 
+# This avoids the 'bq ls' hang issue entirely.
+bq --location=$REGION mk -d --project_id=$PROJECT_ID $DATASET_NAME > /dev/null 2>&1 || echo "   ⚠️ Dataset likely exists or API busy (continuing)..."
 
-    echo "🚀 Running Data Generator Script..."
-    # Passes the bucket name to the python script
-    python3 ../scripts/generate_training_data.py $BUCKET_NAME
-    
-    echo "📥 Loading History CSV into BigQuery..."
-    # Load the CSV file that the python script just uploaded to GCS
-    bq load \
-      --autodetect \
-      --source_format=CSV \
-      --skip_leading_rows=1 \
-      credit_risk_mvp.credit_history \
-      gs://$BUCKET_NAME/credit_history.csv
-      
-    echo "   ✅ Data loaded successfully."
-else
-    echo "⏩ Skipping data generation."
-fi
+# ==================================================================================
+#  PHASE 4: DATA GENERATION
+# ==================================================================================
+# We assume 'y' for automation (Or you can keep the prompt if you prefer)
+echo "🎲 Generating Synthetic Training Data..."
 
-# 5. DEPLOY DATABASE OBJECTS (Views & Models)
-# ----------------------------------------------------------------------------------
-echo "🧠 Deploying SQL Views and ML Models..."
+# Install dependencies strictly for the script (quietly)
+pip3 install google-cloud-storage pandas faker > /dev/null 2>&1
 
-# Create a temporary SQL file with the real bucket name injected
-# We use sed to replace @BUCKET_NAME with the variable $BUCKET_NAME
-sed "s/@BUCKET_NAME/$BUCKET_NAME/g" ../sql/schema.sql > ../sql/deployment.sql
+# EXECUTE THE SCRIPT USING THE DYNAMIC ROOT PATH
+# This fixes the "File not found" error you saw earlier
+python3 "$ROOT_DIR/scripts/generate_training_data.py" $BUCKET_NAME
 
-# Execute the SQL
-bq query --use_legacy_sql=false --project_id=$PROJECT_ID < ../sql/deployment.sql
+echo "📥 Loading History CSV into BigQuery..."
+bq load \
+  --autodetect \
+  --source_format=CSV \
+  --skip_leading_rows=1 \
+  --replace \
+  $PROJECT_ID:$DATASET_NAME.credit_history \
+  gs://$BUCKET_NAME/credit_history.csv > /dev/null 2>&1
 
-# Clean up temp file
-rm ../sql/deployment.sql
+echo "   ✅ Data loaded successfully."
 
-echo "   ✅ Database objects deployed."
+# ==================================================================================
+#  PHASE 5: SQL DEPLOYMENT (Tables & Models)
+# ==================================================================================
+echo "🏗️  Deploying SQL Schema & Models..."
 
-# 6. DEPLOY FRONTEND (Cloud Run)
-# ----------------------------------------------------------------------------------
-echo "🚀 Deploying Streamlit App to Cloud Run..."
+# We replace the placeholders in the SQL file dynamically and run it
+sed "s/PROJECT_ID/$PROJECT_ID/g; s/BUCKET_NAME/$BUCKET_NAME/g" "$ROOT_DIR/sql/schema.sql" > "$ROOT_DIR/sql/processed_schema.sql"
 
-# Move to frontend directory to execute deploy
-cd ../frontend
+# Run the query (This creates External Tables and Trains the Model)
+bq query --use_legacy_sql=false --project_id=$PROJECT_ID < "$ROOT_DIR/sql/processed_schema.sql"
+rm "$ROOT_DIR/sql/processed_schema.sql"
+
+echo "   ✅ Model training initiated (Logistic Regression)."
+
+# ==================================================================================
+#  PHASE 6: CLOUD RUN DEPLOYMENT
+# ==================================================================================
+echo "🚀 Deploying Frontend to Cloud Run..."
 
 gcloud run deploy credit-risk-portal \
-  --source . \
-  --project=$PROJECT_ID \
-  --region=$REGION \
-  --port=8501 \
-  --allow-unauthenticated
+  --source "$ROOT_DIR/frontend" \
+  --platform managed \
+  --region $REGION \
+  --allow-unauthenticated \
+  --set-env-vars PROJECT_ID=$PROJECT_ID \
+  --quiet
 
-# Move back to infra directory
-cd ../infra
-
-echo "------------------------------------------------------------------"
-echo "✅ SETUP COMPLETE!"
-echo "   Your app should be live at the URL above."
-echo "------------------------------------------------------------------"
+echo "========================================================"
+echo "✅ DEPLOYMENT COMPLETE!"
+echo "========================================================"

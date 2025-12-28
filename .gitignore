@@ -16,3 +16,7 @@ venv/
 data/
 *.pdf
 *.csv
+credit_history.csv
+batch_results/
+__pycache__/
+*.pyc
