@@ -1,5 +1,3 @@
-Markdown
-
 # 🏦 Credit Risk Decision Engine (GCP Serverless MVP)
 
 A serverless, real-time Machine Learning pipeline built on Google Cloud Platform to assess loan application risk. This project demonstrates an end-to-end "Lakehouse" architecture using **BigQuery ML** for inference, **Cloud Run** for the frontend, and **Cloud Storage** for document ingestion.
