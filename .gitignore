@@ -20,3 +20,6 @@ credit_history.csv
 batch_results/
 __pycache__/
 *.pyc
+sql/schema_processed.sql
+sql/processed_schema.sql
+infra/.terraform.lock.hcl
